@@ -24,7 +24,7 @@ ARG GO_VERSION
 ARG CMAKE_VERSION
 USER 0
 
-# 1a. Enable EPEL + CRB (CodeReady Builder) + install plugin prereqs
+# 1. Enable EPEL + CRB (CodeReady Builder) + install plugin prereqs
 #     CRB is required for mesa-vulkan-drivers on AlmaLinux 9
 RUN dnf -y install epel-release \
     && dnf -y install dnf-plugins-core dnf-plugin-versionlock \
@@ -32,7 +32,7 @@ RUN dnf -y install epel-release \
     && dnf clean all \
     && rm -rf /var/cache/dnf
 
-# 1c. Patched mesa-krunkit drivers (enables M-series GPU remoting via Vulkan)
+# 2. Patched mesa-krunkit drivers (enables M-series GPU remoting via Vulkan)
 #     Enable COPR first, then install without --repo so dnf can resolve all deps
 #     (mesa 24.x needs LLVM 19, libdrm, libX11-xcb, libxshmfence from EPEL/CRB)
 RUN dnf -y copr enable slp/mesa-krunkit epel-9-aarch64 \
@@ -46,7 +46,7 @@ RUN dnf -y copr enable slp/mesa-krunkit epel-9-aarch64 \
     && dnf clean all \
     && rm -rf /var/cache/dnf
 
-# 1d. Build toolchain
+# 3. Build toolchain
 #     - cmake and Go downloaded from upstream for version control
 #     - glslang provides glslangValidator (needed by cmake to detect Vulkan)
 #     - python3 needed by shaderc's git-sync-deps
@@ -72,7 +72,7 @@ RUN curl -fsSL \
     "https://github.com/Kitware/CMake/releases/download/v${CMAKE_VERSION}/cmake-${CMAKE_VERSION}-linux-aarch64.tar.gz" \
     | tar xz -C /usr/local --strip-components=1
 
-# 1d-extra. Build glslc from shaderc source (must come after cmake download)
+# 4. Build glslc from shaderc source (must come after cmake download)
 #           LunarG does not ship an aarch64 SDK, so we compile from source.
 #           git-sync-deps fetches the pinned glslang + spirv-tools versions.
 RUN git clone --depth 1 https://github.com/google/shaderc /tmp/shaderc \
@@ -87,14 +87,14 @@ RUN git clone --depth 1 https://github.com/google/shaderc /tmp/shaderc \
     && cp /tmp/shaderc-build/glslc/glslc /usr/local/bin/ \
     && rm -rf /tmp/shaderc /tmp/shaderc-build
 
-# 1e. Clone Ollama at the pinned version and fetch Go deps
+# 5. Clone Ollama at the pinned version and fetch Go deps
 WORKDIR /build
 RUN git clone --depth 1 --branch ${OLLAMA_VERSION} \
         --recurse-submodules --shallow-submodules \
         https://github.com/ollama/ollama . \
     && go mod download
 
-# 1f. Build the Vulkan-enabled llama-server backend
+# 6. Build the Vulkan-enabled llama-server backend
 #     v0.40.x uses llama/server as the cmake source (confirmed from Ollama's Dockerfile)
 #     glslangValidator from glslang is used for GLSL->SPIR-V shader compilation
 ENV CMAKE_GENERATOR=Ninja
@@ -105,9 +105,9 @@ RUN cmake -S llama/server \
         -DCMAKE_INSTALL_PREFIX=/build/dist \
     && cmake --build build/llama-server-vulkan -- -l$(nproc) \
     && cmake --install build/llama-server-vulkan --strip \
-    && cp /build/dist/lib64/libggml-vulkan.so* /build/dist/lib/ollama/
+    && cp /build/dist/lib*/libggml-vulkan.so* /build/dist/lib/ollama/
 
-# 1g. Build the Ollama Go binary
+# 7. Build the Ollama Go binary
 #     Note: -ldflags must be passed directly, not via GOFLAGS
 RUN CGO_ENABLED=1 go build -trimpath -ldflags="-w -s" -o /usr/local/bin/ollama .
 
@@ -116,14 +116,14 @@ FROM almalinux:9 AS runtime
 ARG OLLAMA_VERSION
 USER 0
 
-# 2a. Enable EPEL + CRB + versionlock plugin
+# 8. Enable EPEL + CRB + versionlock plugin
 RUN dnf -y install epel-release \
     && dnf -y install dnf-plugins-core dnf-plugin-versionlock \
     && dnf config-manager --enable crb \
     && dnf clean all \
     && rm -rf /var/cache/dnf
 
-# 2c. Patched mesa runtime — enable COPR then install with full dep resolution
+# 9. Patched mesa runtime — enable COPR then install with full dep resolution
 RUN dnf -y copr enable slp/mesa-krunkit epel-9-aarch64 \
     && dnf -y install \
         mesa-vulkan-drivers \
@@ -135,7 +135,7 @@ RUN dnf -y copr enable slp/mesa-krunkit epel-9-aarch64 \
     && dnf clean all \
     && rm -rf /var/cache/dnf
 
-# 2d. Copy ollama binary and Vulkan backend libs from builder
+# 10. Copy ollama binary and Vulkan backend libs from builder
 #     Ollama v0.40.x searches /usr/local/lib/ollama/ by default
 COPY --from=builder /usr/local/bin/ollama     /usr/local/bin/ollama
 COPY --from=builder /build/dist/lib/ollama    /usr/local/lib/ollama/

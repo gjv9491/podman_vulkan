@@ -29,6 +29,13 @@ DOCKERFILE_PATH="${SCRIPT_DIR}/Dockerfile"
 
 OLLAMA_DIR="$HOME/.ollama"
 
+# ── Usage ────────────────────────────────────────────────────────────────────
+[[ "${1:-}" == "-h" || "${1:-}" == "--help" ]] && {
+  echo "Usage: ./setup.sh"
+  echo "Builds and starts GPU-accelerated Ollama + Open WebUI in podman containers."
+  exit 0
+}
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
 log()  { echo "[INFO]  $*"; }
 warn() { echo "[WARN]  $*"; }
@@ -99,6 +106,7 @@ run_container() {
   log "Creating container '$CONTAINER_NAME'..."
   podman run -d \
     --name "$CONTAINER_NAME" \
+    --restart unless-stopped \
     --device /dev/dri \
     --mount type=bind,src="$OLLAMA_DIR",target=/root/.ollama,rw=true \
     -e OLLAMA_HOST=0.0.0.0:${CONTAINER_PORT} \
@@ -121,7 +129,7 @@ bindings = d.get('HostConfig',{}).get('PortBindings',{}).get('${WEBUI_CONTAINER_
 port_ok = any(b.get('HostPort') == '$WEBUI_HOST_PORT' for b in bindings)
 img_ok  = d.get('Config',{}).get('Image','') == '$WEBUI_IMAGE'
 env     = d.get('Config',{}).get('Env',[])
-env_ok  = any('OLLAMA_BASE_URL' in e and '${HOST_PORT}' in e for e in env)
+env_ok  = any(e.split('=',1)[-1].endswith(':${HOST_PORT}') for e in env if e.startswith('OLLAMA_BASE_URL='))
 sys.exit(0 if (port_ok and img_ok and env_ok) else 1)
 EOF
 }
@@ -132,6 +140,7 @@ run_webui() {
   log "Creating container '$WEBUI_CONTAINER_NAME'..."
   podman run -d \
     --name "$WEBUI_CONTAINER_NAME" \
+    --restart unless-stopped \
     -p "${WEBUI_HOST_PORT}:${WEBUI_CONTAINER_PORT}" \
     -v "${WEBUI_DATA_DIR}:/app/backend/data" \
     -e OLLAMA_BASE_URL="http://host.containers.internal:${HOST_PORT}" \
@@ -189,6 +198,8 @@ if ! podman machine ssh "$MACHINE_NAME" ls /dev/dri/renderD128 &>/dev/null; then
 fi
 log "GPU passthrough verified."
 
+mkdir -p "$OLLAMA_DIR"
+
 # ── 2. Custom image (requires running machine) ───────────────────────────────
 if image_exists; then
   if image_matches_version; then
@@ -208,7 +219,6 @@ else
 fi
 
 # ── 3. Container lifecycle ────────────────────────────────────────────────────
-mkdir -p "$OLLAMA_DIR"
 
 if container_exists; then
   if container_matches_config; then

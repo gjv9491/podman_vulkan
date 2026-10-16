@@ -5,7 +5,7 @@ GPU-accelerated Ollama in a sandboxed Linux container on Apple Silicon (M1–M5)
 ## How it works
 
 ```
-Ollama (container) → Vulkan API → Mesa Venus driver → virtio-gpu → MoltenVK → Apple Metal → M4 GPU
+Ollama (container) → Vulkan API → Mesa Venus driver → virtio-gpu → MoltenVK → Apple Metal → GPU
 ```
 
 The container runs a Linux VM via `krunkit` (libkrun). The VM gets a virtual GPU
@@ -38,21 +38,14 @@ Metal access.
 
 ```bash
 podman logs ollama-sandbox 2>&1 | grep 'inference compute'
-# Expected: description="Virtio-GPU Venus (Apple M4 Max)" total="64.0 GiB"
+# Expected: description="Virtio-GPU Venus (Apple M<N> ...)" total="<X> GiB"
 ```
 
 ## Performance
 
 Paravirtualized GPU (Venus→Metal) is ~40× faster than CPU-only containers but
-slower than native Metal due to Vulkan translation overhead. Measured on M4 Max
-with qwen3.6 (22 GB):
-
-| Metric | Container (Venus→Metal) | Native Metal |
-|--------|------------------------|--------------|
-| Generation | ~35 tok/s | ~60-80 tok/s |
-| Prompt eval | ~15 tok/s | ~30-50 tok/s |
-
-The tradeoff: ~50% speed for full Linux sandbox isolation.
+slower than native Metal due to Vulkan translation overhead. Expect roughly
+~50% of native Metal throughput — the tradeoff for full Linux sandbox isolation.
 
 ## Key config
 
