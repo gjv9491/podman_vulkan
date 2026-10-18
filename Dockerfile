@@ -58,6 +58,7 @@ RUN dnf -y install \
         vulkan-loader-devel libstdc++-devel \
         spirv-headers-devel spirv-tools-devel \
         unzip \
+        openssh-clients \
     && dnf clean all \
     && rm -rf /var/cache/dnf
 

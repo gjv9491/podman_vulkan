@@ -28,6 +28,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DOCKERFILE_PATH="${SCRIPT_DIR}/Dockerfile"
 
 OLLAMA_DIR="$HOME/.ollama"
+SSH_DIR="$HOME/.ssh"
+GIT_DIR="$HOME/Documents/git_code"
 
 # ── Usage ────────────────────────────────────────────────────────────────────
 [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]] && {
@@ -109,6 +111,8 @@ run_container() {
     --restart unless-stopped \
     --device /dev/dri \
     --mount type=bind,src="$OLLAMA_DIR",target=/root/.ollama,rw=true \
+    --mount type=bind,src="$SSH_DIR",target=/root/.ssh,ro=true \
+    --mount type=bind,src="$GIT_DIR",target=/root/git_code,rw=true \
     -e OLLAMA_HOST=0.0.0.0:${CONTAINER_PORT} \
     -e OLLAMA_VULKAN=1 \
     -e OLLAMA_MAX_LOADED_MODELS=1 \
