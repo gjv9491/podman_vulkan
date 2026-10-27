@@ -17,6 +17,13 @@ WEBUI_IMAGE="ghcr.io/open-webui/open-webui:main"
 WEBUI_HOST_PORT="3000"
 WEBUI_CONTAINER_PORT="8080"
 WEBUI_DATA_DIR="$HOME/.open-webui"
+NETWORK_NAME="ollama-net"
+
+BASH_CONTAINER_NAME="alma-bash"
+BASH_IMAGE_NAME="alma-bash:latest"
+BASH_HOST_PORT="8080"
+BASH_CONTAINER_PORT="8080"
+BASH_AGENT_DIR="$HOME/Documents/education/agents/almalinux-bash-agent"
 
 OLLAMA_VERSION="v0.40.3"
 GO_VERSION="1.23.4"
@@ -30,6 +37,7 @@ DOCKERFILE_PATH="${SCRIPT_DIR}/Dockerfile"
 OLLAMA_DIR="$HOME/.ollama"
 SSH_DIR="$HOME/.ssh"
 GIT_DIR="$HOME/Documents/git_code"
+AGENTS_DIR="$HOME/Documents/education/agents"
 
 # ── Usage ────────────────────────────────────────────────────────────────────
 [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]] && {
@@ -52,6 +60,10 @@ image_exists()     { podman image inspect "$CUSTOM_IMAGE" &>/dev/null; }
 webui_exists()     { podman ps -a --format '{{.Names}}' 2>/dev/null | grep -qx "$WEBUI_CONTAINER_NAME"; }
 webui_running()    { podman ps    --format '{{.Names}}' 2>/dev/null | grep -qx "$WEBUI_CONTAINER_NAME"; }
 
+bash_exists()      { podman ps -a --format '{{.Names}}' 2>/dev/null | grep -qx "$BASH_CONTAINER_NAME"; }
+bash_running()     { podman ps    --format '{{.Names}}' 2>/dev/null | grep -qx "$BASH_CONTAINER_NAME"; }
+bash_image_exists(){ podman image inspect "$BASH_IMAGE_NAME" &>/dev/null; }
+
 image_matches_version() {
   local label
   label=$(podman image inspect "$CUSTOM_IMAGE" --format '{{index .Labels "ollama.version"}}' 2>/dev/null)
@@ -72,17 +84,17 @@ build_image() {
 
 machine_matches_config() {
   python3 - <<EOF 2>/dev/null
-import subprocess, json, sys
+import subprocess, json, sys, yaml
 r = subprocess.run(['podman','machine','inspect','$MACHINE_NAME'], capture_output=True, text=True)
 if r.returncode != 0: sys.exit(1)
 info = json.loads(r.stdout)[0]
 d = info.get('Resources', {})
-provider = info.get('VMType', '').lower()
-match = (d.get('CPUs') == $MACHINE_CPUS and
-         d.get('Memory') == $MACHINE_MEMORY and
-         d.get('DiskSize') == $MACHINE_DISK and
-         provider == 'libkrun')
-sys.exit(0 if match else 1)
+res_ok = (d.get('CPUs') == $MACHINE_CPUS and
+          d.get('Memory') == $MACHINE_MEMORY and
+          d.get('DiskSize') == $MACHINE_DISK)
+r2 = subprocess.run(['podman','machine','info','--format','json'], capture_output=True, text=True)
+provider = json.loads(r2.stdout).get('Host',{}).get('VMType','').lower() if r2.returncode == 0 else ''
+sys.exit(0 if (res_ok and provider == 'libkrun') else 1)
 EOF
 }
 
@@ -108,11 +120,11 @@ run_container() {
   log "Creating container '$CONTAINER_NAME'..."
   podman run -d \
     --name "$CONTAINER_NAME" \
+    --network "$NETWORK_NAME" \
     --restart unless-stopped \
     --device /dev/dri \
     --mount type=bind,src="$OLLAMA_DIR",target=/root/.ollama,rw=true \
     --mount type=bind,src="$SSH_DIR",target=/root/.ssh,ro=true \
-    --mount type=bind,src="$GIT_DIR",target=/root/git_code,rw=true \
     -e OLLAMA_HOST=0.0.0.0:${CONTAINER_PORT} \
     -e OLLAMA_VULKAN=1 \
     -e OLLAMA_MAX_LOADED_MODELS=1 \
@@ -133,8 +145,11 @@ bindings = d.get('HostConfig',{}).get('PortBindings',{}).get('${WEBUI_CONTAINER_
 port_ok = any(b.get('HostPort') == '$WEBUI_HOST_PORT' for b in bindings)
 img_ok  = d.get('Config',{}).get('Image','') == '$WEBUI_IMAGE'
 env     = d.get('Config',{}).get('Env',[])
-env_ok  = any(e.split('=',1)[-1].endswith(':${HOST_PORT}') for e in env if e.startswith('OLLAMA_BASE_URL='))
-sys.exit(0 if (port_ok and img_ok and env_ok) else 1)
+env_ok  = any(e == 'OLLAMA_BASE_URL=http://${CONTAINER_NAME}:${CONTAINER_PORT}' for e in env)
+mounts  = d.get('Mounts') or []
+srcs    = {m.get('Source','') for m in mounts}
+mnt_ok  = {'$GIT_DIR','$AGENTS_DIR'}.issubset(srcs)
+sys.exit(0 if (port_ok and img_ok and env_ok and mnt_ok) else 1)
 EOF
 }
 
@@ -144,11 +159,46 @@ run_webui() {
   log "Creating container '$WEBUI_CONTAINER_NAME'..."
   podman run -d \
     --name "$WEBUI_CONTAINER_NAME" \
+    --network "$NETWORK_NAME" \
     --restart unless-stopped \
     -p "${WEBUI_HOST_PORT}:${WEBUI_CONTAINER_PORT}" \
     -v "${WEBUI_DATA_DIR}:/app/backend/data" \
-    -e OLLAMA_BASE_URL="http://host.containers.internal:${HOST_PORT}" \
+    --mount type=bind,src="$GIT_DIR",target=/root/git_code,rw=true \
+    --mount type=bind,src="$AGENTS_DIR",target=/root/agents,rw=true \
+    -e OLLAMA_BASE_URL="http://${CONTAINER_NAME}:${CONTAINER_PORT}" \
     "$WEBUI_IMAGE"
+}
+
+bash_matches_config() {
+  python3 - <<EOF 2>/dev/null
+import subprocess, json, sys
+r = subprocess.run(['podman','inspect','$BASH_CONTAINER_NAME'], capture_output=True, text=True)
+if r.returncode != 0: sys.exit(1)
+d = json.loads(r.stdout)[0]
+bindings = d.get('HostConfig',{}).get('PortBindings',{}).get('${BASH_CONTAINER_PORT}/tcp',[])
+port_ok = any(b.get('HostPort') == '$BASH_HOST_PORT' for b in bindings)
+img_ok  = d.get('Config',{}).get('Image','') == '$BASH_IMAGE_NAME'
+sys.exit(0 if (port_ok and img_ok) else 1)
+EOF
+}
+
+build_bash_image() {
+  log "Building '$BASH_IMAGE_NAME'..."
+  podman build -t "$BASH_IMAGE_NAME" -f "$BASH_AGENT_DIR/Dockerfile" "$BASH_AGENT_DIR"
+  log "Image '$BASH_IMAGE_NAME' built successfully."
+}
+
+run_bash_container() {
+  podman rm -f "$BASH_CONTAINER_NAME" 2>/dev/null || true
+  log "Creating container '$BASH_CONTAINER_NAME'..."
+  podman run -d \
+    --name "$BASH_CONTAINER_NAME" \
+    --network "$NETWORK_NAME" \
+    --restart unless-stopped \
+    -p "${BASH_HOST_PORT}:${BASH_CONTAINER_PORT}" \
+    --mount type=bind,src="$GIT_DIR",target=/root/git_code,rw=true \
+    --mount type=bind,src="$AGENTS_DIR",target=/root/agents,rw=true \
+    "$BASH_IMAGE_NAME"
 }
 
 # ── 0. Host prerequisites (krunkit) ───────────────────────────────────────────
@@ -195,6 +245,21 @@ else
   podman machine start "$MACHINE_NAME"
 fi
 
+# libkrun's DNS proxy can't resolve some Docker CDN domains — use a public
+# resolver but pin the podman-internal gateway hostname in /etc/hosts.
+podman machine ssh "$MACHINE_NAME" "
+  grep -q gateway.containers.internal /etc/hosts 2>/dev/null \
+    || echo '192.168.127.1 gateway.containers.internal host.containers.internal' | sudo tee -a /etc/hosts
+  echo 'nameserver 1.1.1.1' | sudo tee /etc/resolv.conf
+" &>/dev/null
+log "Waiting for VM network..."
+for i in $(seq 1 15); do
+  podman machine ssh "$MACHINE_NAME" "nslookup docker.io" &>/dev/null && break
+  sleep 1
+done
+podman machine ssh "$MACHINE_NAME" "nslookup docker.io" &>/dev/null \
+  || warn "VM DNS may be slow — image pulls might retry."
+
 log "Verifying GPU passthrough (/dev/dri)..."
 if ! podman machine ssh "$MACHINE_NAME" ls /dev/dri/renderD128 &>/dev/null; then
   die "GPU device (/dev/dri) not found in VM — machine is likely using applehv instead of krunkit.
@@ -222,7 +287,12 @@ else
   build_image
 fi
 
-# ── 3. Container lifecycle ────────────────────────────────────────────────────
+# ── 3. Shared network (container-name DNS) ───────────────────────────────────
+podman network exists "$NETWORK_NAME" 2>/dev/null \
+  || podman network create "$NETWORK_NAME" >/dev/null
+log "Network '$NETWORK_NAME' ready."
+
+# ── 4. Container lifecycle ────────────────────────────────────────────────────
 
 if container_exists; then
   if container_matches_config; then
@@ -257,10 +327,32 @@ else
   run_webui
 fi
 
+# ── 6. Bash agent lifecycle ───────────────────────────────────────────────────
+if ! bash_image_exists; then
+  build_bash_image
+fi
+
+if bash_exists; then
+  if bash_matches_config; then
+    log "Container '$BASH_CONTAINER_NAME' matches desired config — keeping it."
+    if ! bash_running; then
+      log "Container is stopped — starting it..."
+      podman start "$BASH_CONTAINER_NAME"
+    fi
+  else
+    warn "Container '$BASH_CONTAINER_NAME' config differs — removing and recreating..."
+    podman rm -f "$BASH_CONTAINER_NAME"
+    run_bash_container
+  fi
+else
+  run_bash_container
+fi
+
 log "────────────────────────────────────────────"
 log "Done."
 log "  Ollama API  : http://localhost:${HOST_PORT}"
 log "  Open WebUI  : http://localhost:${WEBUI_HOST_PORT}"
+log "  Bash Agent  : http://localhost:${BASH_HOST_PORT}"
 log "  GPU         : Venus/Vulkan → Metal (--device /dev/dri)"
 log "  Attach      : podman exec -it $CONTAINER_NAME sh"
 log "  Verify GPU  : podman logs $CONTAINER_NAME 2>&1 | grep 'inference compute'"
