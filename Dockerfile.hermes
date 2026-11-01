@@ -1,4 +1,4 @@
-# Hermes Agent TUI — connects to ollama-sandbox over the shared podman network
+# Hermes Agent TUI — connects to ollama-sandbox and qdrant over ollama-net
 #
 # Built by setup.sh --hermes-agent. Run interactively via ./hermes.sh
 
@@ -13,7 +13,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         openssh-client \
     && rm -rf /var/lib/apt/lists/*
 
-RUN pip install --no-cache-dir hermes-agent==${HERMES_AGENT_VERSION}
+RUN pip install --no-cache-dir hermes-agent==${HERMES_AGENT_VERSION} qdrant-client
 
 LABEL hermes.agent.version="${HERMES_AGENT_VERSION}"
 

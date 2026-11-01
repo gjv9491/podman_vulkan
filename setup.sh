@@ -19,6 +19,12 @@ WEBUI_CONTAINER_PORT="8080"
 WEBUI_DATA_DIR="$HOME/.open-webui"
 NETWORK_NAME="ollama-net"
 
+QDRANT_CONTAINER_NAME="qdrant"
+QDRANT_IMAGE="docker.io/qdrant/qdrant:latest"
+QDRANT_HOST_PORT="6333"
+QDRANT_GRPC_PORT="6334"
+QDRANT_DATA_DIR="$HOME/.qdrant"
+
 OLLAMA_CONTEXT_LENGTH=8192
 OLLAMA_VERSION="v0.40.3"
 GO_VERSION="1.23.4"
@@ -50,23 +56,26 @@ ENABLE_WEBUI=false
 ENABLE_HERMES=false
 ENABLE_HERMES_AGENT=false
 ENABLE_COLIBRI=false
+ENABLE_QDRANT=false
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --webui)        ENABLE_WEBUI=true; shift ;;
     --hermes)       ENABLE_HERMES=true; shift ;;
-    --hermes-agent) ENABLE_HERMES_AGENT=true; ENABLE_HERMES=true; shift ;;
+    --hermes-agent) ENABLE_HERMES_AGENT=true; ENABLE_HERMES=true; ENABLE_QDRANT=true; shift ;;
     --colibri)      ENABLE_COLIBRI=true; shift ;;
-    --all)          ENABLE_WEBUI=true; ENABLE_HERMES=true; ENABLE_HERMES_AGENT=true; ENABLE_COLIBRI=true; shift ;;
+    --qdrant)       ENABLE_QDRANT=true; shift ;;
+    --all)          ENABLE_WEBUI=true; ENABLE_HERMES=true; ENABLE_HERMES_AGENT=true; ENABLE_COLIBRI=true; ENABLE_QDRANT=true; shift ;;
     -h|--help)
-      echo "Usage: ./setup.sh [--webui] [--hermes] [--hermes-agent] [--colibri] [--all]"
+      echo "Usage: ./setup.sh [--webui] [--hermes] [--hermes-agent] [--colibri] [--qdrant] [--all]"
       echo "Builds and starts GPU-accelerated Ollama in a podman container."
       echo ""
       echo "Options:"
       echo "  --webui        Also start Open WebUI"
       echo "  --hermes       Pull Hermes 3 model into Ollama"
-      echo "  --hermes-agent Build hermes-agent container image (implies --hermes)"
+      echo "  --hermes-agent Build hermes-agent container image (implies --hermes, --qdrant)"
       echo "  --colibri      Also start colibri (large MoE models via expert offloading)"
+      echo "  --qdrant       Also start Qdrant vector database"
       echo "  --all          Enable all optional services"
       exit 0 ;;
     *) die "Unknown option: $1 (try --help)" ;;
@@ -88,6 +97,9 @@ hermes_image_exists() { podman image inspect "$HERMES_IMAGE" &>/dev/null; }
 
 webui_exists()     { podman ps -a --format '{{.Names}}' 2>/dev/null | grep -qx "$WEBUI_CONTAINER_NAME"; }
 webui_running()    { podman ps    --format '{{.Names}}' 2>/dev/null | grep -qx "$WEBUI_CONTAINER_NAME"; }
+
+qdrant_exists()    { podman ps -a --format '{{.Names}}' 2>/dev/null | grep -qx "$QDRANT_CONTAINER_NAME"; }
+qdrant_running()   { podman ps    --format '{{.Names}}' 2>/dev/null | grep -qx "$QDRANT_CONTAINER_NAME"; }
 
 image_matches_version() {
   local label colibri_label
@@ -218,6 +230,21 @@ run_webui() {
     --mount type=bind,src="$GIT_DIR",target=/root/git_code,rw=true \
     -e OLLAMA_BASE_URL="http://${CONTAINER_NAME}:${CONTAINER_PORT}" \
     "$WEBUI_IMAGE"
+}
+
+run_qdrant() {
+  mkdir -p "$QDRANT_DATA_DIR/storage" "$QDRANT_DATA_DIR/snapshots"
+  podman rm -f "$QDRANT_CONTAINER_NAME" 2>/dev/null || true
+  log "Creating container '$QDRANT_CONTAINER_NAME'..."
+  podman run -d \
+    --name "$QDRANT_CONTAINER_NAME" \
+    --network "$NETWORK_NAME" \
+    --restart unless-stopped \
+    -p "${QDRANT_HOST_PORT}:6333" \
+    -p "${QDRANT_GRPC_PORT}:6334" \
+    -v "${QDRANT_DATA_DIR}/storage:/qdrant/storage" \
+    -v "${QDRANT_DATA_DIR}/snapshots:/qdrant/snapshots" \
+    "$QDRANT_IMAGE"
 }
 
 # ── 0. Host prerequisites (krunkit) ───────────────────────────────────────────
@@ -378,7 +405,23 @@ else
   log "Hermes Agent skipped (pass --hermes-agent to enable)."
 fi
 
-# ── 8. colibri setup (optional: --colibri) ──────────────────────────────────
+# ── 8. Qdrant vector database (optional: --qdrant, implied by --hermes-agent)
+if $ENABLE_QDRANT; then
+  if qdrant_exists; then
+    if qdrant_running; then
+      log "Container '$QDRANT_CONTAINER_NAME' is already running."
+    else
+      log "Container '$QDRANT_CONTAINER_NAME' is stopped — starting it..."
+      podman start "$QDRANT_CONTAINER_NAME"
+    fi
+  else
+    run_qdrant
+  fi
+else
+  log "Qdrant skipped (pass --qdrant to enable)."
+fi
+
+# ── 9. colibri setup (optional: --colibri) ──────────────────────────────────
 if $ENABLE_COLIBRI; then
   log "colibri is available inside the container."
   log "Verifying colibri Vulkan GPU detection..."
@@ -393,6 +436,7 @@ else
   log "colibri skipped (pass --colibri to enable setup; binaries are always in the container)."
 fi
 
+
 log "────────────────────────────────────────────"
 log "Done."
 log "  Ollama API  : http://localhost:${HOST_PORT}"
@@ -400,6 +444,8 @@ $ENABLE_WEBUI      && log "  Open WebUI  : http://localhost:${WEBUI_HOST_PORT}"
 $ENABLE_HERMES     && log "  Hermes 3    : ollama run hermes3 (via localhost:${HOST_PORT})"
 $ENABLE_HERMES_AGENT && log "  Hermes TUI  : ./hermes.sh"
 $ENABLE_COLIBRI    && log "  colibri     : podman exec -it $CONTAINER_NAME coli chat --model /root/.colibri/<model>"
+$ENABLE_QDRANT     && log "  Qdrant API  : http://localhost:${QDRANT_HOST_PORT} (gRPC :${QDRANT_GRPC_PORT})"
+$ENABLE_QDRANT     && log "  Qdrant (net): http://${QDRANT_CONTAINER_NAME}:6333 (from containers)"
 log "  GPU         : Venus/Vulkan → Metal (--device /dev/dri)"
 log "  Attach      : podman exec -it $CONTAINER_NAME sh"
 log "  Verify GPU  : podman logs $CONTAINER_NAME 2>&1 | grep 'inference compute'"

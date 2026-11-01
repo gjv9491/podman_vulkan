@@ -40,6 +40,10 @@ elif ! grep -q "$CONTAINER_URL" "$HERMES_DATA_DIR/config.yaml"; then
   rm -f "$HERMES_DATA_DIR/config.yaml.bak"
 fi
 
+if ! podman ps --format '{{.Names}}' 2>/dev/null | grep -qx "qdrant"; then
+  echo "[WARN]  Qdrant container is not running. Vector memory unavailable. Run ./setup.sh --qdrant" >&2
+fi
+
 podman rm -f hermes-agent 2>/dev/null || true
 
 exec podman run --rm -it \
@@ -47,4 +51,5 @@ exec podman run --rm -it \
   --network "$NETWORK_NAME" \
   --mount type=bind,src="$GIT_DIR",target=/root/git_code,rw=true \
   --mount type=bind,src="$HERMES_DATA_DIR",target=/root/.hermes,rw=true \
+  -e QDRANT_URL="http://qdrant:6333" \
   "$HERMES_IMAGE" "$@"
