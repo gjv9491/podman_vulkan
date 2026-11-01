@@ -1,0 +1,21 @@
+# Hermes Agent TUI — connects to ollama-sandbox over the shared podman network
+#
+# Built by setup.sh --hermes-agent. Run interactively via ./hermes.sh
+
+ARG HERMES_AGENT_VERSION=0.19.0
+
+FROM python:3.11-slim
+ARG HERMES_AGENT_VERSION
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        git curl wget jq tree file \
+        procps net-tools \
+        openssh-client \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN pip install --no-cache-dir hermes-agent==${HERMES_AGENT_VERSION}
+
+LABEL hermes.agent.version="${HERMES_AGENT_VERSION}"
+
+WORKDIR /root/git_code
+ENTRYPOINT ["hermes"]

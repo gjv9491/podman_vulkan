@@ -26,10 +26,15 @@ CMAKE_VERSION="3.31.2"
 CUSTOM_IMAGE_NAME="ollama-vulkan-krunkit"
 CUSTOM_IMAGE="${CUSTOM_IMAGE_NAME}:${OLLAMA_VERSION}"
 
+HERMES_AGENT_VERSION="0.19.0"
+HERMES_IMAGE_NAME="hermes-agent"
+HERMES_IMAGE="${HERMES_IMAGE_NAME}:latest"
+
 COLIBRI_MODEL_DIR="$HOME/.colibri"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DOCKERFILE_PATH="${SCRIPT_DIR}/Dockerfile"
+HERMES_DOCKERFILE_PATH="${SCRIPT_DIR}/Dockerfile.hermes"
 
 OLLAMA_DIR="$HOME/.ollama"
 SSH_DIR="$HOME/.ssh"
@@ -60,7 +65,7 @@ while [[ $# -gt 0 ]]; do
       echo "Options:"
       echo "  --webui        Also start Open WebUI"
       echo "  --hermes       Pull Hermes 3 model into Ollama"
-      echo "  --hermes-agent Install hermes-agent TUI (implies --hermes)"
+      echo "  --hermes-agent Build hermes-agent container image (implies --hermes)"
       echo "  --colibri      Also start colibri (large MoE models via expert offloading)"
       echo "  --all          Enable all optional services"
       exit 0 ;;
@@ -79,6 +84,7 @@ machine_running()  { podman machine inspect "$MACHINE_NAME" --format '{{.State}}
 container_exists() { podman ps -a --format '{{.Names}}' 2>/dev/null | grep -qx "$CONTAINER_NAME"; }
 container_running(){ podman ps    --format '{{.Names}}' 2>/dev/null | grep -qx "$CONTAINER_NAME"; }
 image_exists()     { podman image inspect "$CUSTOM_IMAGE" &>/dev/null; }
+hermes_image_exists() { podman image inspect "$HERMES_IMAGE" &>/dev/null; }
 
 webui_exists()     { podman ps -a --format '{{.Names}}' 2>/dev/null | grep -qx "$WEBUI_CONTAINER_NAME"; }
 webui_running()    { podman ps    --format '{{.Names}}' 2>/dev/null | grep -qx "$WEBUI_CONTAINER_NAME"; }
@@ -88,6 +94,12 @@ image_matches_version() {
   label=$(podman image inspect "$CUSTOM_IMAGE" --format '{{index .Labels "ollama.version"}}' 2>/dev/null)
   colibri_label=$(podman image inspect "$CUSTOM_IMAGE" --format '{{index .Labels "colibri.included"}}' 2>/dev/null)
   [[ "$label" == "$OLLAMA_VERSION" && "$colibri_label" == "true" ]]
+}
+
+hermes_image_matches_version() {
+  local label
+  label=$(podman image inspect "$HERMES_IMAGE" --format '{{index .Labels "hermes.agent.version"}}' 2>/dev/null)
+  [[ "$label" == "$HERMES_AGENT_VERSION" ]]
 }
 
 build_image() {
@@ -100,6 +112,16 @@ build_image() {
     -f "$DOCKERFILE_PATH" \
     "$SCRIPT_DIR"
   log "Image '$CUSTOM_IMAGE' built successfully."
+}
+
+build_hermes_image() {
+  log "Building '$HERMES_IMAGE'..."
+  podman build \
+    --build-arg HERMES_AGENT_VERSION="$HERMES_AGENT_VERSION" \
+    -t "$HERMES_IMAGE" \
+    -f "$HERMES_DOCKERFILE_PATH" \
+    "$SCRIPT_DIR"
+  log "Image '$HERMES_IMAGE' built successfully."
 }
 
 machine_matches_config() {
@@ -337,32 +359,21 @@ else
   log "Hermes 3 pull skipped (pass --hermes to enable)."
 fi
 
-# ── 7. Hermes Agent TUI (optional: --hermes-agent) ──────────────────────────
-HERMES_CONFIG_DIR="$HOME/.hermes"
-HERMES_CONFIG="$HERMES_CONFIG_DIR/config.yaml"
-
+# ── 7. Hermes Agent image (optional: --hermes-agent) ────────────────────────
 if $ENABLE_HERMES_AGENT; then
-  if ! command -v hermes &>/dev/null; then
-    log "Installing hermes-agent via pip..."
-    pip install --quiet hermes-agent
+  if hermes_image_exists; then
+    if hermes_image_matches_version; then
+      log "Image '$HERMES_IMAGE' is up to date (v${HERMES_AGENT_VERSION}) — skipping build."
+    else
+      warn "Image '$HERMES_IMAGE' version differs from v${HERMES_AGENT_VERSION} — rebuilding..."
+      podman image rm -f "$HERMES_IMAGE"
+      build_hermes_image
+    fi
   else
-    log "hermes-agent already installed."
+    log "Image '$HERMES_IMAGE' not found — building..."
+    build_hermes_image
   fi
-
-  mkdir -p "$HERMES_CONFIG_DIR"
-  if [[ ! -f "$HERMES_CONFIG" ]]; then
-    log "Writing Hermes config → $HERMES_CONFIG"
-    cat > "$HERMES_CONFIG" <<YAML
-provider: custom
-base_url: "http://localhost:${HOST_PORT}/v1"
-model: hermes3
-api_key: "ollama"
-YAML
-  else
-    log "Hermes config already exists at $HERMES_CONFIG — not overwriting."
-  fi
-
-  log "Hermes Agent ready. Run: hermes"
+  log "Hermes Agent ready. Run: ./hermes.sh"
 else
   log "Hermes Agent skipped (pass --hermes-agent to enable)."
 fi
@@ -387,7 +398,7 @@ log "Done."
 log "  Ollama API  : http://localhost:${HOST_PORT}"
 $ENABLE_WEBUI      && log "  Open WebUI  : http://localhost:${WEBUI_HOST_PORT}"
 $ENABLE_HERMES     && log "  Hermes 3    : ollama run hermes3 (via localhost:${HOST_PORT})"
-$ENABLE_HERMES_AGENT && log "  Hermes TUI  : hermes (config at ~/.hermes/config.yaml)"
+$ENABLE_HERMES_AGENT && log "  Hermes TUI  : ./hermes.sh"
 $ENABLE_COLIBRI    && log "  colibri     : podman exec -it $CONTAINER_NAME coli chat --model /root/.colibri/<model>"
 log "  GPU         : Venus/Vulkan → Metal (--device /dev/dri)"
 log "  Attach      : podman exec -it $CONTAINER_NAME sh"
