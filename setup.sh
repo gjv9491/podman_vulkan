@@ -19,17 +19,14 @@ WEBUI_CONTAINER_PORT="8080"
 WEBUI_DATA_DIR="$HOME/.open-webui"
 NETWORK_NAME="ollama-net"
 
-BASH_CONTAINER_NAME="alma-bash"
-BASH_IMAGE_NAME="alma-bash:latest"
-BASH_HOST_PORT="8080"
-BASH_CONTAINER_PORT="8080"
-BASH_AGENT_DIR="$HOME/Documents/education/agents/almalinux-bash-agent"
-
+OLLAMA_CONTEXT_LENGTH=8192
 OLLAMA_VERSION="v0.40.3"
 GO_VERSION="1.23.4"
 CMAKE_VERSION="3.31.2"
 CUSTOM_IMAGE_NAME="ollama-vulkan-krunkit"
 CUSTOM_IMAGE="${CUSTOM_IMAGE_NAME}:${OLLAMA_VERSION}"
+
+COLIBRI_MODEL_DIR="$HOME/.colibri"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DOCKERFILE_PATH="${SCRIPT_DIR}/Dockerfile"
@@ -37,19 +34,45 @@ DOCKERFILE_PATH="${SCRIPT_DIR}/Dockerfile"
 OLLAMA_DIR="$HOME/.ollama"
 SSH_DIR="$HOME/.ssh"
 GIT_DIR="$HOME/Documents/git_code"
-AGENTS_DIR="$HOME/Documents/education/agents"
-
-# ── Usage ────────────────────────────────────────────────────────────────────
-[[ "${1:-}" == "-h" || "${1:-}" == "--help" ]] && {
-  echo "Usage: ./setup.sh"
-  echo "Builds and starts GPU-accelerated Ollama + Open WebUI in podman containers."
-  exit 0
-}
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 log()  { echo "[INFO]  $*"; }
 warn() { echo "[WARN]  $*"; }
 die()  { echo "[ERROR] $*" >&2; exit 1; }
+
+# ── Parse flags ──────────────────────────────────────────────────────────────
+ENABLE_WEBUI=false
+ENABLE_HERMES=false
+ENABLE_HERMES_AGENT=false
+ENABLE_COLIBRI=false
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --webui)        ENABLE_WEBUI=true; shift ;;
+    --hermes)       ENABLE_HERMES=true; shift ;;
+    --hermes-agent) ENABLE_HERMES_AGENT=true; ENABLE_HERMES=true; shift ;;
+    --colibri)      ENABLE_COLIBRI=true; shift ;;
+    --all)          ENABLE_WEBUI=true; ENABLE_HERMES=true; ENABLE_HERMES_AGENT=true; ENABLE_COLIBRI=true; shift ;;
+    -h|--help)
+      echo "Usage: ./setup.sh [--webui] [--hermes] [--hermes-agent] [--colibri] [--all]"
+      echo "Builds and starts GPU-accelerated Ollama in a podman container."
+      echo ""
+      echo "Options:"
+      echo "  --webui        Also start Open WebUI"
+      echo "  --hermes       Pull Hermes 3 model into Ollama"
+      echo "  --hermes-agent Install hermes-agent TUI (implies --hermes)"
+      echo "  --colibri      Also start colibri (large MoE models via expert offloading)"
+      echo "  --all          Enable all optional services"
+      exit 0 ;;
+    *) die "Unknown option: $1 (try --help)" ;;
+  esac
+done
+
+# Hermes Agent needs ≥64K context
+if $ENABLE_HERMES_AGENT && (( OLLAMA_CONTEXT_LENGTH < 65536 )); then
+  OLLAMA_CONTEXT_LENGTH=65536
+  log "Bumped OLLAMA_CONTEXT_LENGTH to $OLLAMA_CONTEXT_LENGTH for Hermes Agent."
+fi
 
 machine_exists()   { podman machine inspect "$MACHINE_NAME" &>/dev/null; }
 machine_running()  { podman machine inspect "$MACHINE_NAME" --format '{{.State}}' 2>/dev/null | grep -qi "running"; }
@@ -60,14 +83,11 @@ image_exists()     { podman image inspect "$CUSTOM_IMAGE" &>/dev/null; }
 webui_exists()     { podman ps -a --format '{{.Names}}' 2>/dev/null | grep -qx "$WEBUI_CONTAINER_NAME"; }
 webui_running()    { podman ps    --format '{{.Names}}' 2>/dev/null | grep -qx "$WEBUI_CONTAINER_NAME"; }
 
-bash_exists()      { podman ps -a --format '{{.Names}}' 2>/dev/null | grep -qx "$BASH_CONTAINER_NAME"; }
-bash_running()     { podman ps    --format '{{.Names}}' 2>/dev/null | grep -qx "$BASH_CONTAINER_NAME"; }
-bash_image_exists(){ podman image inspect "$BASH_IMAGE_NAME" &>/dev/null; }
-
 image_matches_version() {
-  local label
+  local label colibri_label
   label=$(podman image inspect "$CUSTOM_IMAGE" --format '{{index .Labels "ollama.version"}}' 2>/dev/null)
-  [[ "$label" == "$OLLAMA_VERSION" ]]
+  colibri_label=$(podman image inspect "$CUSTOM_IMAGE" --format '{{index .Labels "colibri.included"}}' 2>/dev/null)
+  [[ "$label" == "$OLLAMA_VERSION" && "$colibri_label" == "true" ]]
 }
 
 build_image() {
@@ -84,7 +104,7 @@ build_image() {
 
 machine_matches_config() {
   python3 - <<EOF 2>/dev/null
-import subprocess, json, sys, yaml
+import subprocess, json, sys
 r = subprocess.run(['podman','machine','inspect','$MACHINE_NAME'], capture_output=True, text=True)
 if r.returncode != 0: sys.exit(1)
 info = json.loads(r.stdout)[0]
@@ -106,32 +126,42 @@ if r.returncode != 0: sys.exit(1)
 d = json.loads(r.stdout)[0]
 bindings = d.get('HostConfig',{}).get('PortBindings',{}).get('${CONTAINER_PORT}/tcp',[])
 port_ok = any(b.get('HostPort') == '$HOST_PORT' for b in bindings)
+coli_bindings = d.get('HostConfig',{}).get('PortBindings',{}).get('8080/tcp',[])
+coli_port_ok = any(b.get('HostPort') == '8080' for b in coli_bindings)
 img_ok  = d.get('Config',{}).get('Image','') == '$CUSTOM_IMAGE'
 env     = d.get('Config',{}).get('Env',[])
 env_ok  = any('OLLAMA_MAX_LOADED_MODELS=1' in e for e in env)
+ctx_ok  = any('OLLAMA_CONTEXT_LENGTH=$OLLAMA_CONTEXT_LENGTH' == e for e in env)
 devs    = d.get('HostConfig',{}).get('Devices') or []
 gpu_ok  = any('/dev/dri' in str(dev) for dev in devs)
-sys.exit(0 if (port_ok and img_ok and env_ok and gpu_ok) else 1)
+mounts  = d.get('Mounts') or []
+srcs    = {m.get('Source','') for m in mounts}
+coli_ok = '$COLIBRI_MODEL_DIR' in srcs
+sys.exit(0 if (port_ok and coli_port_ok and img_ok and env_ok and ctx_ok and gpu_ok and coli_ok) else 1)
 EOF
 }
 
 run_container() {
   podman rm -f "$CONTAINER_NAME" 2>/dev/null || true
   log "Creating container '$CONTAINER_NAME'..."
+  mkdir -p "$COLIBRI_MODEL_DIR"
   podman run -d \
     --name "$CONTAINER_NAME" \
     --network "$NETWORK_NAME" \
     --restart unless-stopped \
     --device /dev/dri \
     --mount type=bind,src="$OLLAMA_DIR",target=/root/.ollama,rw=true \
+    --mount type=bind,src="$COLIBRI_MODEL_DIR",target=/root/.colibri,rw=true \
     --mount type=bind,src="$SSH_DIR",target=/root/.ssh,ro=true \
     -e OLLAMA_HOST=0.0.0.0:${CONTAINER_PORT} \
     -e OLLAMA_VULKAN=1 \
     -e OLLAMA_MAX_LOADED_MODELS=1 \
-    -e OLLAMA_CONTEXT_LENGTH=8192 \
+    -e OLLAMA_KEEP_ALIVE=5m \
+    -e OLLAMA_CONTEXT_LENGTH=${OLLAMA_CONTEXT_LENGTH} \
     -e OLLAMA_FLASH_ATTENTION=1 \
     -e OLLAMA_KV_CACHE_TYPE=q8_0 \
     -p "${HOST_PORT}:${CONTAINER_PORT}" \
+    -p "8080:8080" \
     "$CUSTOM_IMAGE"
 }
 
@@ -148,7 +178,7 @@ env     = d.get('Config',{}).get('Env',[])
 env_ok  = any(e == 'OLLAMA_BASE_URL=http://${CONTAINER_NAME}:${CONTAINER_PORT}' for e in env)
 mounts  = d.get('Mounts') or []
 srcs    = {m.get('Source','') for m in mounts}
-mnt_ok  = {'$GIT_DIR','$AGENTS_DIR'}.issubset(srcs)
+mnt_ok  = '$GIT_DIR' in srcs
 sys.exit(0 if (port_ok and img_ok and env_ok and mnt_ok) else 1)
 EOF
 }
@@ -164,41 +194,8 @@ run_webui() {
     -p "${WEBUI_HOST_PORT}:${WEBUI_CONTAINER_PORT}" \
     -v "${WEBUI_DATA_DIR}:/app/backend/data" \
     --mount type=bind,src="$GIT_DIR",target=/root/git_code,rw=true \
-    --mount type=bind,src="$AGENTS_DIR",target=/root/agents,rw=true \
     -e OLLAMA_BASE_URL="http://${CONTAINER_NAME}:${CONTAINER_PORT}" \
     "$WEBUI_IMAGE"
-}
-
-bash_matches_config() {
-  python3 - <<EOF 2>/dev/null
-import subprocess, json, sys
-r = subprocess.run(['podman','inspect','$BASH_CONTAINER_NAME'], capture_output=True, text=True)
-if r.returncode != 0: sys.exit(1)
-d = json.loads(r.stdout)[0]
-bindings = d.get('HostConfig',{}).get('PortBindings',{}).get('${BASH_CONTAINER_PORT}/tcp',[])
-port_ok = any(b.get('HostPort') == '$BASH_HOST_PORT' for b in bindings)
-img_ok  = d.get('Config',{}).get('Image','') == '$BASH_IMAGE_NAME'
-sys.exit(0 if (port_ok and img_ok) else 1)
-EOF
-}
-
-build_bash_image() {
-  log "Building '$BASH_IMAGE_NAME'..."
-  podman build -t "$BASH_IMAGE_NAME" -f "$BASH_AGENT_DIR/Dockerfile" "$BASH_AGENT_DIR"
-  log "Image '$BASH_IMAGE_NAME' built successfully."
-}
-
-run_bash_container() {
-  podman rm -f "$BASH_CONTAINER_NAME" 2>/dev/null || true
-  log "Creating container '$BASH_CONTAINER_NAME'..."
-  podman run -d \
-    --name "$BASH_CONTAINER_NAME" \
-    --network "$NETWORK_NAME" \
-    --restart unless-stopped \
-    -p "${BASH_HOST_PORT}:${BASH_CONTAINER_PORT}" \
-    --mount type=bind,src="$GIT_DIR",target=/root/git_code,rw=true \
-    --mount type=bind,src="$AGENTS_DIR",target=/root/agents,rw=true \
-    "$BASH_IMAGE_NAME"
 }
 
 # ── 0. Host prerequisites (krunkit) ───────────────────────────────────────────
@@ -310,49 +307,88 @@ else
   run_container
 fi
 
-# ── 4. Open WebUI lifecycle ───────────────────────────────────────────────────
-if webui_exists; then
-  if webui_matches_config; then
-    log "Container '$WEBUI_CONTAINER_NAME' matches desired config (image=$WEBUI_IMAGE, port=${WEBUI_HOST_PORT}:${WEBUI_CONTAINER_PORT}) — keeping it."
-    if ! webui_running; then
-      log "Container is stopped — starting it..."
-      podman start "$WEBUI_CONTAINER_NAME"
+# ── 5. Open WebUI lifecycle (optional: --webui) ──────────────────────────────
+if $ENABLE_WEBUI; then
+  if webui_exists; then
+    if webui_matches_config; then
+      log "Container '$WEBUI_CONTAINER_NAME' matches desired config (image=$WEBUI_IMAGE, port=${WEBUI_HOST_PORT}:${WEBUI_CONTAINER_PORT}) — keeping it."
+      if ! webui_running; then
+        log "Container is stopped — starting it..."
+        podman start "$WEBUI_CONTAINER_NAME"
+      fi
+    else
+      warn "Container '$WEBUI_CONTAINER_NAME' config differs — removing and recreating..."
+      podman rm -f "$WEBUI_CONTAINER_NAME"
+      run_webui
     fi
   else
-    warn "Container '$WEBUI_CONTAINER_NAME' config differs — removing and recreating..."
-    podman rm -f "$WEBUI_CONTAINER_NAME"
     run_webui
   fi
 else
-  run_webui
+  log "Open WebUI skipped (pass --webui to enable)."
 fi
 
-# ── 6. Bash agent lifecycle ───────────────────────────────────────────────────
-if ! bash_image_exists; then
-  build_bash_image
-fi
-
-if bash_exists; then
-  if bash_matches_config; then
-    log "Container '$BASH_CONTAINER_NAME' matches desired config — keeping it."
-    if ! bash_running; then
-      log "Container is stopped — starting it..."
-      podman start "$BASH_CONTAINER_NAME"
-    fi
-  else
-    warn "Container '$BASH_CONTAINER_NAME' config differs — removing and recreating..."
-    podman rm -f "$BASH_CONTAINER_NAME"
-    run_bash_container
-  fi
+# ── 6. Pull Hermes 3 model (optional: --hermes) ─────────────────────────────
+if $ENABLE_HERMES; then
+  log "Pulling Hermes 3 model (this may take a while on first run)..."
+  podman exec "$CONTAINER_NAME" ollama pull hermes3
+  log "Hermes 3 model ready."
 else
-  run_bash_container
+  log "Hermes 3 pull skipped (pass --hermes to enable)."
+fi
+
+# ── 7. Hermes Agent TUI (optional: --hermes-agent) ──────────────────────────
+HERMES_CONFIG_DIR="$HOME/.hermes"
+HERMES_CONFIG="$HERMES_CONFIG_DIR/config.yaml"
+
+if $ENABLE_HERMES_AGENT; then
+  if ! command -v hermes &>/dev/null; then
+    log "Installing hermes-agent via pip..."
+    pip install --quiet hermes-agent
+  else
+    log "hermes-agent already installed."
+  fi
+
+  mkdir -p "$HERMES_CONFIG_DIR"
+  if [[ ! -f "$HERMES_CONFIG" ]]; then
+    log "Writing Hermes config → $HERMES_CONFIG"
+    cat > "$HERMES_CONFIG" <<YAML
+provider: custom
+base_url: "http://localhost:${HOST_PORT}/v1"
+model: hermes3
+api_key: "ollama"
+YAML
+  else
+    log "Hermes config already exists at $HERMES_CONFIG — not overwriting."
+  fi
+
+  log "Hermes Agent ready. Run: hermes"
+else
+  log "Hermes Agent skipped (pass --hermes-agent to enable)."
+fi
+
+# ── 8. colibri setup (optional: --colibri) ──────────────────────────────────
+if $ENABLE_COLIBRI; then
+  log "colibri is available inside the container."
+  log "Verifying colibri Vulkan GPU detection..."
+  podman exec "$CONTAINER_NAME" coli plan --model /root/.colibri 2>&1 | head -5 || true
+  log "colibri ready."
+  log ""
+  log "  Download a model:  podman exec -it $CONTAINER_NAME coli setup --model /root/.colibri"
+  log "  Chat:              podman exec -it $CONTAINER_NAME coli chat --model /root/.colibri/<model>"
+  log "  Serve (API):       podman exec -it $CONTAINER_NAME coli serve --model /root/.colibri/<model> --host 0.0.0.0 --port 8080"
+  log "  Import GGUF:       podman exec -it $CONTAINER_NAME coli import /root/.ollama/models/blobs/<blob>"
+else
+  log "colibri skipped (pass --colibri to enable setup; binaries are always in the container)."
 fi
 
 log "────────────────────────────────────────────"
 log "Done."
 log "  Ollama API  : http://localhost:${HOST_PORT}"
-log "  Open WebUI  : http://localhost:${WEBUI_HOST_PORT}"
-log "  Bash Agent  : http://localhost:${BASH_HOST_PORT}"
+$ENABLE_WEBUI      && log "  Open WebUI  : http://localhost:${WEBUI_HOST_PORT}"
+$ENABLE_HERMES     && log "  Hermes 3    : ollama run hermes3 (via localhost:${HOST_PORT})"
+$ENABLE_HERMES_AGENT && log "  Hermes TUI  : hermes (config at ~/.hermes/config.yaml)"
+$ENABLE_COLIBRI    && log "  colibri     : podman exec -it $CONTAINER_NAME coli chat --model /root/.colibri/<model>"
 log "  GPU         : Venus/Vulkan → Metal (--device /dev/dri)"
 log "  Attach      : podman exec -it $CONTAINER_NAME sh"
 log "  Verify GPU  : podman logs $CONTAINER_NAME 2>&1 | grep 'inference compute'"
