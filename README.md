@@ -122,7 +122,7 @@ Qdrant provides persistent vector storage for hermes-agent. Embeddings and metad
 5. **ollama-sandbox** — starts the container with `--device /dev/dri`, bind mounts, and environment config. Checks existing container config and only recreates if it differs
 6. **Open WebUI** (`--webui`) — pulls and starts `open-webui` connected to ollama-sandbox
 7. **Hermes 3 model** (`--hermes`) — runs `ollama pull hermes3` inside the container
-8. **hermes-agent image** (`--hermes-agent`) — builds from `Dockerfile.hermes` (Python 3.11-slim + hermes-agent + qdrant-client)
+8. **hermes-agent image** (`--hermes-agent`) — builds from `Dockerfile.hermes` (Python 3.11-slim + hermes-agent + qdrant-client + ddgs)
 9. **Qdrant** (`--qdrant`) — pulls and starts `qdrant/qdrant:latest` with persistent storage
 10. **colibri** (`--colibri`) — verifies Vulkan GPU detection, prints model download/usage instructions
 
@@ -152,6 +152,10 @@ Qdrant provides persistent vector storage for hermes-agent. Embeddings and metad
 5. Passes `QDRANT_URL=http://qdrant:6333` as an environment variable
 
 The hermes-agent container is ephemeral (`--rm`) — it is destroyed when you exit. Config persists in `~/.hermes/`, vector memory persists in `~/.qdrant/`.
+
+### Web search
+
+The hermes-agent image includes `ddgs` (DuckDuckGo search), which provides the `web_search` built-in tool. No API keys needed — DuckDuckGo has server-side rate limits but no auth. The container has full internet access through the podman VM's NAT.
 
 ## Using colibri (large MoE models)
 
@@ -250,7 +254,7 @@ colibri's expert offloading adds disk I/O latency per token but enables models t
 |------|---------|
 | `setup.sh` | Main orchestrator — builds images, creates/manages all containers |
 | `Dockerfile` | Multi-stage build for ollama-vulkan-krunkit image (Ollama + colibri + Vulkan) |
-| `Dockerfile.hermes` | Lightweight image for hermes-agent (Python + hermes-agent + qdrant-client) |
+| `Dockerfile.hermes` | Lightweight image for hermes-agent (Python + hermes-agent + qdrant-client + ddgs) |
 | `hermes.sh` | Convenience wrapper to launch hermes-agent container |
 | `colibri.sh` | Convenience wrapper to run colibri commands in ollama-sandbox |
 | `claude_qwen.sh` | Launches Claude Code using local Ollama API with Qwen model |
