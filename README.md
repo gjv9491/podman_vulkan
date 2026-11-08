@@ -256,6 +256,42 @@ colibri's expert offloading adds disk I/O latency per token but enables models t
 | `claude_qwen.sh` | Launches Claude Code using local Ollama API with Qwen model |
 | `Modelfile_simple` | Custom Ollama Modelfile for Qwen 3.6 with tuned system prompt |
 
+## Slimming down the Hermes system prompt
+
+Hermes ships with 53 builtin skills enabled by default. Each injects tool schemas into the system prompt, totalling ~56 KB (~15K tokens). On local models (especially MoE models via colibri), this massive prompt causes multi-minute cold starts because every token must be prefilled through the expert routing layers.
+
+Check current prompt size:
+
+```bash
+podman exec hermes-agent hermes prompt-size
+```
+
+### Nuclear option: remove all bundled skills
+
+```bash
+podman exec hermes-agent hermes skills opt-out --remove --yes
+```
+
+Then restart hermes (`Ctrl+C` your `./hermes.sh` and rerun it). This drops the prompt from ~15K to ~4–5K tokens, cutting cold-start prefill time by roughly 2/3.
+
+### Reinstall only what you need
+
+```bash
+# Re-enable bundled skill seeding (if you want to cherry-pick)
+podman exec hermes-agent hermes skills opt-in
+
+# Install specific skills
+podman exec hermes-agent hermes skills install github
+podman exec hermes-agent hermes skills install codebase-inspection
+```
+
+### List / verify
+
+```bash
+podman exec hermes-agent hermes skills list       # see what's installed
+podman exec hermes-agent hermes prompt-size        # confirm token savings
+```
+
 ## Troubleshooting
 
 **GPU not detected:**
