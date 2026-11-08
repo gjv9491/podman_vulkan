@@ -37,6 +37,8 @@ HERMES_IMAGE_NAME="hermes-agent"
 HERMES_IMAGE="${HERMES_IMAGE_NAME}:latest"
 
 COLIBRI_MODEL_DIR="$HOME/.colibri"
+COLIBRI_MODEL=""
+COLIBRI_PORT="8080"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DOCKERFILE_PATH="${SCRIPT_DIR}/Dockerfile"
@@ -64,23 +66,36 @@ while [[ $# -gt 0 ]]; do
     --hermes)       ENABLE_HERMES=true; shift ;;
     --hermes-agent) ENABLE_HERMES_AGENT=true; ENABLE_HERMES=true; ENABLE_QDRANT=true; shift ;;
     --colibri)      ENABLE_COLIBRI=true; shift ;;
+    --colibri-model) ENABLE_COLIBRI=true; COLIBRI_MODEL="$2"; shift 2 ;;
     --qdrant)       ENABLE_QDRANT=true; shift ;;
     --all)          ENABLE_WEBUI=true; ENABLE_HERMES=true; ENABLE_HERMES_AGENT=true; ENABLE_COLIBRI=true; ENABLE_QDRANT=true; shift ;;
     -h|--help)
-      echo "Usage: ./setup.sh [--webui] [--hermes] [--hermes-agent] [--colibri] [--qdrant] [--all]"
+      echo "Usage: ./setup.sh [--webui] [--hermes] [--hermes-agent] [--colibri] [--colibri-model PATH] [--qdrant] [--all]"
       echo "Builds and starts GPU-accelerated Ollama in a podman container."
       echo ""
       echo "Options:"
-      echo "  --webui        Also start Open WebUI"
-      echo "  --hermes       Pull Hermes 3 model into Ollama"
-      echo "  --hermes-agent Build hermes-agent container image (implies --hermes, --qdrant)"
-      echo "  --colibri      Also start colibri (large MoE models via expert offloading)"
-      echo "  --qdrant       Also start Qdrant vector database"
-      echo "  --all          Enable all optional services"
+      echo "  --webui              Also start Open WebUI"
+      echo "  --hermes             Pull Hermes 3 model into Ollama"
+      echo "  --hermes-agent       Build hermes-agent container image (implies --hermes, --qdrant)"
+      echo "  --colibri            Also start colibri (large MoE models via expert offloading)"
+      echo "  --colibri-model PATH Container path to colibri model dir (auto-detected if omitted)"
+      echo "  --qdrant             Also start Qdrant vector database"
+      echo "  --all                Enable all optional services"
       exit 0 ;;
     *) die "Unknown option: $1 (try --help)" ;;
   esac
 done
+
+# Auto-detect colibri model if --colibri but no --colibri-model
+if $ENABLE_COLIBRI && [[ -z "$COLIBRI_MODEL" ]]; then
+  for d in "$COLIBRI_MODEL_DIR"/*/; do
+    if [[ -d "$d" ]]; then
+      COLIBRI_MODEL="/root/.colibri/$(basename "$d")"
+      log "Auto-detected colibri model: $COLIBRI_MODEL"
+      break
+    fi
+  done
+fi
 
 # Hermes Agent needs ≥64K context
 if $ENABLE_HERMES_AGENT && (( OLLAMA_CONTEXT_LENGTH < 65536 )); then
@@ -166,12 +181,13 @@ img_ok  = d.get('Config',{}).get('Image','') == '$CUSTOM_IMAGE'
 env     = d.get('Config',{}).get('Env',[])
 env_ok  = any('OLLAMA_MAX_LOADED_MODELS=1' in e for e in env)
 ctx_ok  = any('OLLAMA_CONTEXT_LENGTH=$OLLAMA_CONTEXT_LENGTH' == e for e in env)
+coli_env_ok = any('COLIBRI_MODEL=$COLIBRI_MODEL' == e for e in env)
 devs    = d.get('HostConfig',{}).get('Devices') or []
 gpu_ok  = any('/dev/dri' in str(dev) for dev in devs)
 mounts  = d.get('Mounts') or []
 srcs    = {m.get('Source','') for m in mounts}
 coli_ok = '$COLIBRI_MODEL_DIR' in srcs
-sys.exit(0 if (port_ok and coli_port_ok and img_ok and env_ok and ctx_ok and gpu_ok and coli_ok) else 1)
+sys.exit(0 if (port_ok and coli_port_ok and img_ok and env_ok and ctx_ok and coli_env_ok and gpu_ok and coli_ok) else 1)
 EOF
 }
 
@@ -196,6 +212,8 @@ run_container() {
     -e OLLAMA_KV_CACHE_TYPE=q8_0 \
     -p "${HOST_PORT}:${CONTAINER_PORT}" \
     -p "8080:8080" \
+    -e COLIBRI_MODEL="${COLIBRI_MODEL}" \
+    -e COLIBRI_PORT="${COLIBRI_PORT}" \
     "$CUSTOM_IMAGE"
 }
 

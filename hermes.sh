@@ -31,6 +31,26 @@ base_url: "${CONTAINER_URL}"
 model: hermes3
 api_key: "ollama"
 YAML
+  # Add colibri provider if the port is exposed
+  if podman inspect "$OLLAMA_CONTAINER" --format '{{json .HostConfig.PortBindings}}' 2>/dev/null | grep -q '"8080/tcp"'; then
+    COLIBRI_URL="http://${OLLAMA_CONTAINER}:8080/v1"
+    cat >> "$HERMES_DATA_DIR/config.yaml" <<YAML
+providers:
+  ollama-launch:
+    api: ${CONTAINER_URL}
+    default_model: hermes3
+    models:
+      - hermes3:latest
+    name: Ollama
+  colibri:
+    api: ${COLIBRI_URL}
+    default_model: qwen3.6-colibri
+    models:
+      - qwen3.6-colibri
+    name: Colibri
+YAML
+    echo "[INFO]  Added colibri provider (${COLIBRI_URL})"
+  fi
 elif ! grep -q "$CONTAINER_URL" "$HERMES_DATA_DIR/config.yaml"; then
   echo "[INFO]  Patching config URLs for container network..."
   sed -i.bak \

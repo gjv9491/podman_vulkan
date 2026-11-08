@@ -202,8 +202,10 @@ ENV COLI_VK_ATTN=1
 ENV COLI_NO_OMP_TUNE=1
 ENV COLI_VK_SHADERS=/usr/local/libexec/colibri/shaders
 
+COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
+
 EXPOSE 11434
 EXPOSE 8080
 
-ENTRYPOINT ["/usr/local/bin/ollama"]
-CMD ["serve"]
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
