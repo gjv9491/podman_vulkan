@@ -31,25 +31,39 @@ base_url: "${CONTAINER_URL}"
 model: hermes3
 api_key: "ollama"
 YAML
-  # Add colibri provider if the port is exposed
+  # Build providers block — always includes ollama, conditionally colibri + nvidia
+  HAS_COLIBRI=false
   if podman inspect "$OLLAMA_CONTAINER" --format '{{json .HostConfig.PortBindings}}' 2>/dev/null | grep -q '"8080/tcp"'; then
+    HAS_COLIBRI=true
     COLIBRI_URL="http://${OLLAMA_CONTAINER}:8080/v1"
+  fi
+  if $HAS_COLIBRI || [[ -n "${NVIDIA_API_KEY:-}" ]]; then
     cat >> "$HERMES_DATA_DIR/config.yaml" <<YAML
 providers:
   ollama-launch:
     api: ${CONTAINER_URL}
     default_model: hermes3
-    models:
-      - hermes3:latest
     name: Ollama
+YAML
+    if $HAS_COLIBRI; then
+      cat >> "$HERMES_DATA_DIR/config.yaml" <<YAML
   colibri:
     api: ${COLIBRI_URL}
     default_model: qwen3.6-colibri
-    models:
-      - qwen3.6-colibri
     name: Colibri
 YAML
-    echo "[INFO]  Added colibri provider (${COLIBRI_URL})"
+      echo "[INFO]  Added colibri provider (${COLIBRI_URL})"
+    fi
+    if [[ -n "${NVIDIA_API_KEY:-}" ]]; then
+      cat >> "$HERMES_DATA_DIR/config.yaml" <<YAML
+  nvidia:
+    api: https://integrate.api.nvidia.com/v1
+    api_key: ${NVIDIA_API_KEY}
+    default_model: deepseek-ai/deepseek-v4.1-flash
+    name: NVIDIA NIM
+YAML
+      echo "[INFO]  Added nvidia provider (deepseek-v4.1-flash)"
+    fi
   fi
 elif ! grep -q "$CONTAINER_URL" "$HERMES_DATA_DIR/config.yaml"; then
   echo "[INFO]  Patching config URLs for container network..."
@@ -72,4 +86,5 @@ exec podman run --rm -it \
   --mount type=bind,src="$GIT_DIR",target=/root/git_code,rw=true \
   --mount type=bind,src="$HERMES_DATA_DIR",target=/root/.hermes,rw=true \
   -e QDRANT_URL="http://qdrant:6333" \
+  ${NVIDIA_API_KEY:+-e NVIDIA_API_KEY="$NVIDIA_API_KEY"} \
   "$HERMES_IMAGE" "$@"
